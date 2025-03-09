@@ -1,0 +1,132 @@
+#meta developer: @modules_hikkaa
+from .. import loader, utils
+import logging
+
+logger = logging.getLogger(__name__)
+
+@loader.tds
+class VoiceMod(loader.Module):
+    """Модуль для голосовых сообщений"""
+
+    strings = {"name": "Voice"}
+
+    async def client_ready(self, client, db):
+        self.db = db
+        self.client = client
+        if not self.db.get(self.strings["name"], "voices"):
+            self.db.set(self.strings["name"], "voices", {})
+        if not self.db.get(self.strings["name"], "prefix"):
+            self.db.set(self.strings["name"], "prefix", ".")
+
+    def _get_voices(self):
+        return self.db.get(self.strings["name"], "voices", {})
+
+    def _save_voices(self, voices):
+        self.db.set(self.strings["name"], "voices", voices)
+
+    def _get_prefix(self):
+        return self.db.get(self.strings["name"], "prefix", ".")
+
+    def _save_prefix(self, prefix):
+        self.db.set(self.strings["name"], "prefix", prefix)
+
+    async def addvoicecmd(self, message):
+        """|Добавить голосовое.  .addvoice <ссылка или ответ на голосовое> <команда>. Пример: .addvoice https://t.me/sjsjsjejidjei2owk/123 команда или .addvoice <ответ на голосовое> команда."""
+        args = utils.get_args_raw(message)  
+        reply = await message.get_reply_message()  
+        voices = self._get_voices()
+
+        if not args and not reply:
+            await message.edit("<b>Ссылка на голосовое не указана или нет ответа на голосовое</b>")
+            return
+
+        if reply and reply.media and getattr(reply.media, "document", None) and reply.media.document.mime_type == "audio/ogg":
+            if not args:
+                await message.edit("<b>Не указана команда.</b>!")
+                return
+            command = args.strip()
+            file = await reply.download_media()
+
+            if command in voices:
+                await message.edit(f"<b>Команда:</b> <code>{command}</code> <b>занята.</b>")
+                return
+
+            voices[command] = file
+        elif args.startswith("http") and "t.me" in args:
+            args_split = args.split(" ", 1)
+            if len(args_split) < 2:
+                await message.edit("<b>Не указана команда.</b>")
+                return
+            link = args_split[0]
+            command = args_split[1]
+
+            if command in voices:
+                await message.edit(f"<b>Команда <code>{command}</code> <b>занята.</b>")
+                return
+
+            voices[command] = link
+        else:
+            await message.edit("<b>Укажи ссылку или ответь на голосовое сообщение.</b>")
+            return
+
+        self._save_voices(voices)
+        await message.edit(f"<b>Голосовое добавлено его команда</b>: <code>{command}</code>.")
+
+    async def delvoicecmd(self, message):
+        """|Удалить команду .delvoice <команда>."""
+        args = utils.get_args_raw(message)
+        voices = self._get_voices()
+
+        if not args or args not in voices:
+            await message.edit("<b>Такой команды нету.</b>")
+            return
+
+        del voices[args]
+        self._save_voices(voices)
+        await message.edit(f"<b>Голосовое</b> <code>{args}</code> <b>удалено.</b>")
+
+    async def voicelistcmd(self, message):
+        """|Показать список всех команд."""
+        voices = self._get_voices()
+        if not voices:
+            await message.edit("<b>Список пуст.</b>")
+            return
+
+        voice_list = "\n".join([f"{i + 1}. {cmd}" for i, cmd in enumerate(voices)])
+        await message.edit(f"🔈 <b>Список:</b>\n<code>{voice_list}</code>")
+
+    async def watcher(self, message):
+        prefix = self._get_prefix()
+        if not message.text or not message.text.startswith(prefix):
+            return
+
+        command = message.text[len(prefix):].strip()
+        voices = self._get_voices()
+
+        if command not in voices:
+            return
+
+        voice = voices[command]
+        reply_to_msg = message.reply_to_msg_id or message.id
+
+        if voice.startswith("http"):
+            await self.client.send_file(
+                message.chat_id, voice, voice_note=True, reply_to=reply_to_msg
+            )
+        else:
+            await self.client.send_file(
+                message.chat_id, voice, voice_note=True, reply_to=reply_to_msg
+            )
+
+        await message.delete()  
+
+    async def setccmd(self, message):
+        """|Изменить префикс команды. Пример: .setc @"""
+        args = utils.get_args_raw(message)
+        if not args or len(args) != 1:
+            await message.edit("<b>Укажите один символ в качестве префикса.</b>")
+            return
+
+        new_prefix = args.strip()
+        self._save_prefix(new_prefix)
+        await message.edit(f"<b>Префикс изменён на:</b> <code>{new_prefix}</code>.")
