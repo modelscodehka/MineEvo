@@ -1,0 +1,108 @@
+#meta developer: @modules_hikkaa
+import aiofiles
+import aiohttp
+import asyncio
+import re
+import os
+import logging
+from dataclasses import dataclass
+from urllib.parse import urljoin
+from typing import Union, Optional, List
+from tqdm import tqdm
+from .. import loader, utils
+
+@dataclass
+class MediaData:
+    folder: str
+    content: Union[str, List[str]]
+    content_type: str
+
+
+class TikTokAPI:
+    def __init__(self, base_url: Optional[str] = None):
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (iPad; U; CPU OS 3_2 like Mac OS X; en-us) "
+            "AppleWebKit/531.21.10 (KHTML, like Gecko) Version/4.0.4 Mobile/7B334b Safari/531.21.10"
+        }
+        self.base_url = base_url or "https://www.tikwm.com/"
+        self.session = aiohttp.ClientSession()
+        self.cache = {}
+
+        self.logger = logging.getLogger("TikTokAPI")
+        logging.basicConfig(level=logging.INFO)
+
+    async def close(self):
+        await self.session.close()
+
+    async def _fetch_data(self, url: str):
+        if url in self.cache:
+            return self.cache[url]
+        
+        response = await self._request("api", {"url": url, "hd": 1})
+        self.cache[url] = response
+        return response
+
+    async def _request(self, endpoint: str, params: dict) -> dict:
+        async with self.session.get(urljoin(self.base_url, endpoint), params=params, headers=self.headers) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data.get("data", {})
+
+    @staticmethod
+    def extract_url(text: str) -> Optional[str]:
+        if not text:
+            return None
+        urls = re.findall(r"http[s]?://[^\s]+", text)
+        return urls[0] if urls else None
+
+    async def _download_file(self, url: str, path: str):
+        async with self.session.get(url) as resp:
+            resp.raise_for_status()
+            with open(path, "wb") as file:
+                async for chunk in resp.content.iter_any():
+                    file.write(chunk)
+
+    async def download_video(self, url: str, filename: Optional[str] = None, hd: bool = False) -> MediaData:
+        data = await self._fetch_data(url)
+        video_url = data["hdplay"] if hd else data["play"]
+        filename = filename or f"{data['id']}.mp4"
+
+        async with self.session.get(video_url) as resp:
+            total_size = int(resp.headers.get('content-length', 0))
+            with open(filename, 'wb') as file:
+                with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as pbar:
+                    async for chunk in resp.content.iter_any():
+                        file.write(chunk)
+                        pbar.update(len(chunk))
+
+        return MediaData(folder=os.path.dirname(filename), content=filename, content_type="video")
+
+
+@loader.tds
+class TikTokDL(loader.Module):
+    """Модуль для загрузки видео из TikTok"""
+
+    strings = {"name": "TikTokDL"}
+
+    @loader.command(ru_doc="Скачать видео с TikTok", en_doc="Download a video from TikTok")
+    async def tt(self, message):
+        args = utils.get_args(message)
+        reply = await message.get_reply_message()
+
+        url = self.extract_url(" ".join(args)) or (self.extract_url(reply.text) if reply else None)
+
+        if not url:
+            return await utils.answer(message, "Укажите ссылку на видео или ответьте на сообщение с ссылкой.")
+
+        await utils.answer(message, "⏳ Загрузка...")
+
+        api = TikTokAPI()
+
+        try:
+            video = await api.download_video(url)
+            await message.client.send_file(message.to_id, video.content)
+            await message.delete()
+        except Exception as e:
+            await utils.answer(message, f"❌ Ошибка: {e}")
+        finally:
+            await api.close()
